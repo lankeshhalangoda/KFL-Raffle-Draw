@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { Upload, Trophy, Users, Filter, Shuffle, Sparkles } from "lucide-react"
+import { Upload, Trophy, Users, Shuffle, Sparkles, ChevronLeft, ChevronRight } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { WinnerCard } from "@/components/WinnerCard"
 
@@ -24,10 +24,8 @@ interface FilterCondition {
 }
 
 export default function RaffleDrawApp() {
-  const [tournamentType, setTournamentType] = useState<string>("")
   const [data, setData] = useState<ParticipantData[]>([])
   const [columns, setColumns] = useState<string[]>([])
-  const [availableTournamentTypes, setAvailableTournamentTypes] = useState<string[]>([])
   const [filterCondition, setFilterCondition] = useState<FilterCondition>({ column: "", value: "" })
   const [filteredData, setFilteredData] = useState<ParticipantData[]>([])
   const [winner, setWinner] = useState<ParticipantData | null>(null)
@@ -36,6 +34,10 @@ export default function RaffleDrawApp() {
   const [isDrawing, setIsDrawing] = useState(false)
   const [currentName, setCurrentName] = useState<string>("")
   const [drawTime, setDrawTime] = useState<Date | null>(null) // State to store draw time
+
+  // Pagination states
+  const [currentPage, setCurrentPage] = useState(1)
+  const itemsPerPage = 50
 
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -55,22 +57,84 @@ export default function RaffleDrawApp() {
         if (jsonData.length > 0) {
           const columnNames = Object.keys(jsonData[0])
           setColumns(columnNames)
-          setData(jsonData)
-          setFilteredData(jsonData)
+
+          const userIdColumn = columnNames.find(
+            (col) => col.toLowerCase().includes("userid") || col.toLowerCase().includes("user id"),
+          )
+          const responseIdColumn = columnNames.find(
+            (col) => col.toLowerCase().includes("responseid") || col.toLowerCase().includes("response id"),
+          )
+
+          if (!userIdColumn || !responseIdColumn) {
+            console.warn("UserID or ResponseID column not found. Duplicate handling might be inaccurate.")
+            setData(jsonData)
+            setFilteredData(jsonData)
+          } else {
+            const fightColumns = columnNames.filter((col) => col.toLowerCase().includes("vs"))
+            const groupedByUserId = new Map<string, ParticipantData[]>()
+
+            jsonData.forEach((p) => {
+              const userId = p[userIdColumn]?.toString()
+              if (userId) {
+                if (!groupedByUserId.has(userId)) {
+                  groupedByUserId.set(userId, [])
+                }
+                groupedByUserId.get(userId)!.push(p)
+              }
+            })
+
+            const deDupedData: ParticipantData[] = []
+
+            groupedByUserId.forEach((userRows, userId) => {
+              let latestOverallRow: ParticipantData | null = null
+              let latestOverallResponseId = -1
+
+              userRows.forEach((row) => {
+                const currentResponseId = Number.parseFloat(row[responseIdColumn]?.toString() || "0")
+                if (currentResponseId > latestOverallResponseId) {
+                  latestOverallResponseId = currentResponseId
+                  latestOverallRow = row
+                }
+              })
+
+              if (!latestOverallRow) return
+
+              const compositeParticipant: ParticipantData = { ...latestOverallRow }
+
+              fightColumns.forEach((fightCol) => {
+                let latestFightPrediction: string | number | null = null
+                let latestFightResponseId = -1
+
+                userRows.forEach((row) => {
+                  const currentResponseId = Number.parseFloat(row[responseIdColumn]?.toString() || "0")
+                  const prediction = row[fightCol]
+
+                  if (
+                    prediction &&
+                    prediction.toString().trim() !== "" &&
+                    prediction.toString().toLowerCase() !== "null"
+                  ) {
+                    if (currentResponseId > latestFightResponseId) {
+                      latestFightResponseId = currentResponseId
+                      latestFightPrediction = prediction
+                    }
+                  }
+                })
+                if (latestFightPrediction !== null) {
+                  compositeParticipant[fightCol] = latestFightPrediction
+                }
+              })
+              deDupedData.push(compositeParticipant)
+            })
+
+            setData(deDupedData)
+            setFilteredData(deDupedData)
+          }
+
           setWinner(null)
-          setTournamentType("")
           setFilterCondition({ column: "", value: "" })
           setDrawTime(null) // Reset draw time on new upload
-
-          // Find available tournament types
-          const tournamentTypes = []
-          if (columnNames.some((col) => col.toLowerCase().includes("bout schedule"))) {
-            tournamentTypes.push("Bout Schedule")
-          }
-          if (columnNames.some((col) => col.toLowerCase().includes("xtreme championship"))) {
-            tournamentTypes.push("Xtreme Championship")
-          }
-          setAvailableTournamentTypes(tournamentTypes)
+          setCurrentPage(1) // Reset pagination
         }
       } catch (error) {
         console.error("ERROR PARSING FILE:", error)
@@ -84,30 +148,14 @@ export default function RaffleDrawApp() {
 
   const applyFilter = useCallback(() => {
     if (!filterCondition.column || !filterCondition.value) {
-      // Filter by tournament type first
-      const voteColumn = columns.find((col) => col.toLowerCase().includes("select where you vote"))
-      const tournamentFiltered = data.filter((participant) => {
-        if (voteColumn) {
-          const voteValue = participant[voteColumn]
-          return voteValue && voteValue.toString().toLowerCase().includes(tournamentType.toLowerCase())
-        }
-        return true
-      })
-      setFilteredData(tournamentFiltered)
+      setFilteredData(data)
+      setWinner(null)
+      setDrawTime(null)
+      setCurrentPage(1) // Reset pagination
       return
     }
 
-    // First filter by tournament type, then by fight prediction
-    const voteColumn = columns.find((col) => col.toLowerCase().includes("select where you vote"))
-    const tournamentFiltered = data.filter((participant) => {
-      if (voteColumn) {
-        const voteValue = participant[voteColumn]
-        return voteValue && voteValue.toString().toLowerCase().includes(tournamentType.toLowerCase())
-      }
-      return true
-    })
-
-    const filtered = tournamentFiltered.filter((participant) => {
+    const filtered = data.filter((participant) => {
       const cellValue = participant[filterCondition.column]
       return (
         cellValue &&
@@ -120,7 +168,8 @@ export default function RaffleDrawApp() {
     setFilteredData(filtered)
     setWinner(null)
     setDrawTime(null) // Reset draw time on new filter
-  }, [data, filterCondition, tournamentType, columns])
+    setCurrentPage(1) // Reset pagination
+  }, [data, filterCondition])
 
   const selectRandomWinner = useCallback(() => {
     if (filteredData.length === 0) return
@@ -156,59 +205,23 @@ export default function RaffleDrawApp() {
         }, 500)
       }
     }, intervalTime)
-  }, [filteredData])
+  }, [filteredData, columns])
 
   const resetAll = () => {
-    setTournamentType("")
     setData([])
     setColumns([])
-    setAvailableTournamentTypes([])
     setFilterCondition({ column: "", value: "" })
     setFilteredData([])
     setWinner(null)
     setIsDrawing(false)
     setCurrentName("")
     setDrawTime(null)
+    setCurrentPage(1) // Reset pagination
   }
 
-  const getFightColumns = () => {
-    if (!tournamentType) return []
-
-    // First, filter participants by tournament type
-    const voteColumn = columns.find((col) => col.toLowerCase().includes("select where you vote"))
-    const tournamentParticipants = data.filter((participant) => {
-      if (voteColumn) {
-        const voteValue = participant[voteColumn]
-        return voteValue && voteValue.toString().toLowerCase().includes(tournamentType.toLowerCase())
-      }
-      return true
-    })
-
-    // Get the tournament-specific column name
-    const tournamentColumn = columns.find((col) => col.toLowerCase().includes(tournamentType.toLowerCase()))
-
-    if (!tournamentColumn) return []
-
-    // Get unique fight names from the tournament column
-    const uniqueFights = new Set<string>()
-    tournamentParticipants.forEach((participant) => {
-      const fightValue = participant[tournamentColumn]
-      if (
-        fightValue &&
-        fightValue.toString().trim() !== "" &&
-        fightValue.toString().toLowerCase() !== "null" &&
-        fightValue.toString().toLowerCase().includes("vs")
-      ) {
-        uniqueFights.add(fightValue.toString().trim())
-      }
-    })
-
-    // Return columns that match these fight names
-    const fightNames = Array.from(uniqueFights)
-    return columns.filter((col) => {
-      return fightNames.some((fight) => col.toLowerCase() === fight.toLowerCase())
-    })
-  }
+  const getFightColumns = useCallback(() => {
+    return columns.filter((col) => col.toLowerCase().includes("vs"))
+  }, [columns])
 
   const extractFightersFromColumn = useCallback((columnName: string) => {
     if (!columnName.toLowerCase().includes("vs")) return []
@@ -217,6 +230,18 @@ export default function RaffleDrawApp() {
     const fighters = columnName.split(/\s+vs\s+/i).map((fighter) => fighter.trim())
     return fighters.filter((fighter) => fighter.length > 0)
   }, [])
+
+  // Pagination logic
+  const totalPages = Math.ceil(filteredData.length / itemsPerPage)
+  const startIndex = (currentPage - 1) * itemsPerPage
+  const endIndex = startIndex + itemsPerPage
+  const currentTableData = filteredData.slice(startIndex, endIndex)
+
+  const handlePageChange = (page: number) => {
+    if (page >= 1 && page <= totalPages) {
+      setCurrentPage(page)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-white barlow">
@@ -269,62 +294,16 @@ export default function RaffleDrawApp() {
           </CardContent>
         </Card>
 
-        {/* Tournament Type Selection */}
-        {availableTournamentTypes.length > 0 && (
-          <Card className="bg-white border-gray-200 shadow-lg">
-            <CardHeader>
-              <CardTitle className="barlow text-2xl font-bold uppercase kfl-primary-text flex items-center gap-3">
-                <Filter className="h-6 w-6 kfl-primary-text" />
-                STEP 2: SELECT TOURNAMENT TYPE
-              </CardTitle>
-              <CardDescription className="text-gray-600 barlow italic">
-                CHOOSE WHICH TOURNAMENT TYPE YOU WANT TO DRAW WINNERS FOR
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Select
-                value={tournamentType}
-                onValueChange={(value) => {
-                  setTournamentType(value)
-                  setFilterCondition({ column: "", value: "" })
-                  setTimeout(() => {
-                    const voteColumn = columns.find((col) => col.toLowerCase().includes("select where you vote"))
-                    const tournamentFiltered = data.filter((participant) => {
-                      if (voteColumn) {
-                        const voteValue = participant[voteColumn]
-                        return voteValue && voteValue.toString().toLowerCase().includes(value.toLowerCase())
-                      }
-                      return true
-                    })
-                    setFilteredData(tournamentFiltered)
-                  }, 100)
-                }}
-              >
-                <SelectTrigger className="w-full max-w-md bg-gray-50 border-gray-300 text-black barlow">
-                  <SelectValue placeholder="SELECT TOURNAMENT TYPE" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableTournamentTypes.map((type) => (
-                    <SelectItem key={type} value={type} className="barlow font-semibold uppercase">
-                      {type}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Filter Conditions */}
-        {tournamentType && (
+        {/* Filter Conditions - now directly available after file upload */}
+        {data.length > 0 && (
           <Card className="bg-white border-gray-200 shadow-lg">
             <CardHeader>
               <CardTitle className="barlow text-2xl font-bold uppercase kfl-primary-text flex items-center gap-3">
                 <Sparkles className="h-6 w-6 kfl-primary-text" />
-                STEP 3: SET FILTER CONDITIONS
+                STEP 2: SET FILTER CONDITIONS
               </CardTitle>
               <CardDescription className="text-gray-600 barlow italic">
-                FILTER PARTICIPANTS BASED ON THEIR PREDICTIONS FOR {tournamentType.toUpperCase()}
+                FILTER PARTICIPANTS BASED ON THEIR PREDICTIONS
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -400,13 +379,13 @@ export default function RaffleDrawApp() {
           </Card>
         )}
 
-        {/* Winner Selection */}
-        {filteredData.length > 0 && (
+        {/* Winner Selection - now directly available after file upload */}
+        {data.length > 0 && (
           <Card className="bg-white border-gray-200 shadow-lg">
             <CardHeader>
               <CardTitle className="barlow text-2xl font-bold uppercase kfl-primary-text flex items-center gap-3">
                 <Trophy className="h-6 w-6 kfl-primary-text" />
-                STEP 4: DRAW RANDOM WINNER
+                STEP 3: DRAW RANDOM WINNER
               </CardTitle>
               <CardDescription className="text-gray-600 barlow italic">
                 SELECT A RANDOM WINNER FROM FILTERED PARTICIPANTS
@@ -417,7 +396,7 @@ export default function RaffleDrawApp() {
                 <div className="text-center">
                   <Button
                     onClick={selectRandomWinner}
-                    disabled={isDrawing}
+                    disabled={isDrawing || filteredData.length === 0} // Disable if no filtered data
                     size="lg"
                     className="kfl-button-bg hover:opacity-90 barlow font-black text-xl px-8 py-4 uppercase disabled:opacity-50"
                   >
@@ -445,7 +424,7 @@ export default function RaffleDrawApp() {
                 {winner && !isDrawing && drawTime && (
                   <div className="space-y-8">
                     <div className="text-center">
-                      <div className="barlow text-7xl font-black kfl-primary-text winner-animation mb-4 uppercase">
+                      <div className="barlow text-7xl font-black kfl-primary-text winner-glow-animation mb-4 uppercase">
                         {winner.UserName || winner.Username || "WINNER"}
                       </div>
                       <div className="kfl-primary-text barlow text-3xl font-semibold uppercase">
@@ -453,12 +432,7 @@ export default function RaffleDrawApp() {
                       </div>
                     </div>
 
-                    <WinnerCard
-                      winner={winner}
-                      fightColumn={filterCondition.column}
-                      tournamentType={tournamentType}
-                      drawTime={drawTime}
-                    />
+                    <WinnerCard winner={winner} fightColumn={filterCondition.column} drawTime={drawTime} />
                   </div>
                 )}
               </div>
@@ -480,7 +454,7 @@ export default function RaffleDrawApp() {
                 <table className="w-full border-collapse border border-gray-200">
                   <thead>
                     <tr className="bg-gray-100">
-                      {columns.slice(0, 6).map((column) => (
+                      {["UserName", "UserID", "ResponseID", "Telephone"].map((column) => (
                         <th
                           key={column}
                           className="border border-gray-200 px-4 py-3 text-left font-semibold kfl-primary-text barlow uppercase"
@@ -491,12 +465,12 @@ export default function RaffleDrawApp() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredData.slice(0, 10).map((row, index) => (
+                    {currentTableData.map((row, index) => (
                       <tr
                         key={index}
                         className={`${winner === row ? "bg-yellow-100" : "hover:bg-gray-50"} text-gray-800`}
                       >
-                        {columns.slice(0, 6).map((column) => (
+                        {["UserName", "UserID", "ResponseID", "Telephone"].map((column) => (
                           <td key={column} className="border border-gray-200 px-4 py-2 barlow">
                             {row[column]}
                           </td>
@@ -505,9 +479,32 @@ export default function RaffleDrawApp() {
                     ))}
                   </tbody>
                 </table>
-                {filteredData.length > 10 && (
+                {filteredData.length > itemsPerPage && (
+                  <div className="flex justify-between items-center mt-4">
+                    <Button
+                      onClick={() => handlePageChange(currentPage - 1)}
+                      disabled={currentPage === 1}
+                      variant="outline"
+                      className="barlow font-bold text-sm px-4 py-2 bg-white border-gray-300 text-black hover:bg-gray-100 uppercase"
+                    >
+                      <ChevronLeft className="h-4 w-4 mr-2" /> PREVIOUS
+                    </Button>
+                    <span className="barlow text-sm font-medium text-gray-700">
+                      PAGE {currentPage} OF {totalPages}
+                    </span>
+                    <Button
+                      onClick={() => handlePageChange(currentPage + 1)}
+                      disabled={currentPage === totalPages}
+                      variant="outline"
+                      className="barlow font-bold text-sm px-4 py-2 bg-white border-gray-300 text-black hover:bg-gray-100 uppercase"
+                    >
+                      NEXT <ChevronRight className="h-4 w-4 ml-2" />
+                    </Button>
+                  </div>
+                )}
+                {filteredData.length > itemsPerPage && (
                   <p className="text-sm text-gray-600 mt-4 barlow italic">
-                    SHOWING FIRST 10 ROWS OF {filteredData.length} TOTAL
+                    SHOWING {startIndex + 1} - {Math.min(endIndex, filteredData.length)} OF {filteredData.length} TOTAL
                   </p>
                 )}
               </div>
