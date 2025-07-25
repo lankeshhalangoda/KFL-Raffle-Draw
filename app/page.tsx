@@ -34,6 +34,7 @@ export default function RaffleDrawApp() {
   const [isDrawing, setIsDrawing] = useState(false)
   const [currentName, setCurrentName] = useState<string>("")
   const [drawTime, setDrawTime] = useState<Date | null>(null) // State to store draw time
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   // Pagination states
   const [currentPage, setCurrentPage] = useState(1)
@@ -44,24 +45,36 @@ export default function RaffleDrawApp() {
     if (!file) return
 
     setIsLoading(true)
+    setErrorMessage(null) // Clear any previous errors
+    setData([]) // Clear previous data immediately
+    setFilteredData([])
+    setColumns([])
+    setWinner(null)
+    setFilterCondition({ column: "", value: "" })
+    setDrawTime(null)
+    setCurrentPage(1)
+
     const reader = new FileReader()
 
     reader.onload = (e) => {
       try {
         const data = new Uint8Array(e.target?.result as ArrayBuffer)
         const workbook = XLSX.read(data, { type: "array" })
+
+        if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+          throw new Error("The uploaded Excel file contains no sheets.")
+        }
+
         const sheetName = workbook.SheetNames[0]
         const worksheet = workbook.Sheets[sheetName]
+
+        if (!worksheet) {
+          throw new Error(`Could not find sheet '${sheetName}' in the workbook. The file might be corrupted or empty.`)
+        }
+
         const jsonData = XLSX.utils.sheet_to_json(worksheet) as ParticipantData[]
 
         if (jsonData.length === 0) {
-          setData([])
-          setFilteredData([])
-          setColumns([])
-          setWinner(null)
-          setFilterCondition({ column: "", value: "" })
-          setDrawTime(null)
-          setCurrentPage(1)
           setIsLoading(false)
           return // Exit early if no data
         }
@@ -69,61 +82,107 @@ export default function RaffleDrawApp() {
         const columnNames = Object.keys(jsonData[0])
         setColumns(columnNames)
 
-        // Identify key columns for de-duplication
+        // Identify the telephone column and fight columns
         const telephoneColumn = columnNames.find(
           (col) => col.toLowerCase().includes("telephone") || col.toLowerCase().includes("phone"),
         )
-        const responseIdColumn = columnNames.find(
-          (col) => col.toLowerCase().includes("responseid") || col.toLowerCase().includes("response id"),
-        )
+        const fightColumns = columnNames.filter((col) => col.toLowerCase().includes("vs"))
 
-        if (!telephoneColumn || !responseIdColumn) {
-          console.warn("Telephone or ResponseID column not found. Duplicate handling might be inaccurate.")
+        if (!telephoneColumn) {
+          console.warn("Telephone column not found. De-duplication will not be applied.")
           setData(jsonData)
           setFilteredData(jsonData)
         } else {
-          const groupedByTelephone = new Map<string, ParticipantData[]>()
+          // Map to store the latest overall user details for each telephone number
+          // Since jsonData is ordered oldest to latest, simply overwriting ensures we keep the latest.
+          const latestOverallUserDetailsMap = new Map<string, ParticipantData>()
 
-          jsonData.forEach((p) => {
-            const telephone = p[telephoneColumn]?.toString()
+          // Map to store the latest prediction for each unique (telephone, fightColumn) pair
+          const deDupedBoutPredictionsMap = new Map<string, ParticipantData>()
+
+          console.log("--- Starting De-duplication Process ---")
+          jsonData.forEach((row, index) => {
+            const telephone = row[telephoneColumn]?.toString()
+
             if (telephone) {
-              if (!groupedByTelephone.has(telephone)) {
-                groupedByTelephone.set(telephone, [])
-              }
-              groupedByTelephone.get(telephone)!.push(p)
+              // 1. Update latest overall user details for this telephone
+              latestOverallUserDetailsMap.set(telephone, row)
+              console.log(`Row ${index + 1}: Telephone ${telephone}. Latest overall user details updated.`)
+
+              // 2. Update latest prediction for each fight column
+              fightColumns.forEach((fightCol) => {
+                const prediction = row[fightCol]
+                if (
+                  prediction !== undefined &&
+                  prediction !== null &&
+                  prediction.toString().trim() !== "" &&
+                  prediction.toString().toLowerCase() !== "null"
+                ) {
+                  const compositeKey = `${telephone}_${fightCol}`
+                  // Store the entire row for now, we'll combine details later
+                  deDupedBoutPredictionsMap.set(compositeKey, {
+                    ...row,
+                    _fightColumn: fightCol,
+                    _prediction: prediction,
+                  })
+                  console.log(
+                    `  Row ${index + 1}: Latest prediction for ${fightCol} for ${telephone} is '${prediction}'.`,
+                  )
+                }
+              })
+            } else {
+              console.log(`Row ${index + 1}: No telephone found, skipping de-duplication for this row.`)
             }
           })
 
-          const deDupedData: ParticipantData[] = []
+          // 3. Construct the final de-duplicated data
+          const finalDeDupedData: ParticipantData[] = []
+          deDupedBoutPredictionsMap.forEach((boutRecordWithPrediction) => {
+            const telephone = boutRecordWithPrediction[telephoneColumn]?.toString()
+            if (telephone) {
+              const latestOverallDetails = latestOverallUserDetailsMap.get(telephone)
 
-          groupedByTelephone.forEach((userRows) => {
-            // Sort user's rows by ResponseID to ensure the latest is processed last
-            userRows.sort((a, b) => {
-              const resIdA = Number.parseFloat(a[responseIdColumn]?.toString() || "0")
-              const resIdB = Number.parseFloat(b[responseIdColumn]?.toString() || "0")
-              return resIdA - resIdB
-            })
+              if (latestOverallDetails) {
+                // Create a new participant record combining latest overall details with the specific bout prediction
+                const combinedRecord: ParticipantData = { ...latestOverallDetails }
 
-            let finalParticipant: ParticipantData = {}
+                // Ensure the specific fight prediction is from the boutRecordWithPrediction
+                const fightCol = boutRecordWithPrediction._fightColumn as string
+                const prediction = boutRecordWithPrediction._prediction
 
-            // Merge properties from oldest to newest. The latest values will overwrite older ones.
-            userRows.forEach((row) => {
-              finalParticipant = { ...finalParticipant, ...row }
-            })
+                if (fightCol && prediction !== undefined) {
+                  combinedRecord[fightCol] = prediction
+                }
 
-            deDupedData.push(finalParticipant)
+                // Clean up temporary keys
+                delete combinedRecord._fightColumn
+                delete combinedRecord._prediction
+
+                finalDeDupedData.push(combinedRecord)
+              }
+            }
           })
 
-          setData(deDupedData)
-          setFilteredData(deDupedData)
-        }
+          console.log("--- De-duplication Complete ---")
+          console.log("Final de-duplicated participants:", finalDeDupedData)
 
+          setData(finalDeDupedData)
+          setFilteredData(finalDeDupedData)
+        }
+      } catch (error: any) {
+        console.error("ERROR PARSING FILE:", error)
+        setErrorMessage(
+          error.message ||
+            "An unknown error occurred while parsing the file. Please check the file format and content.",
+        )
+        // Also reset states to clear any partial data
+        setData([])
+        setFilteredData([])
+        setColumns([])
         setWinner(null)
         setFilterCondition({ column: "", value: "" })
-        setDrawTime(null) // Reset draw time on new upload
-        setCurrentPage(1) // Reset pagination
-      } catch (error) {
-        console.error("ERROR PARSING FILE:", error)
+        setDrawTime(null)
+        setCurrentPage(1)
       } finally {
         setIsLoading(false)
       }
@@ -203,6 +262,7 @@ export default function RaffleDrawApp() {
     setCurrentName("")
     setDrawTime(null)
     setCurrentPage(1) // Reset pagination
+    setErrorMessage(null) // Clear error message on reset
   }
 
   const getFightColumns = useCallback(() => {
@@ -272,6 +332,11 @@ export default function RaffleDrawApp() {
                   <AlertDescription className="barlow font-medium uppercase">
                     SUCCESSFULLY LOADED {data.length} PARTICIPANTS WITH {columns.length} COLUMNS
                   </AlertDescription>
+                </Alert>
+              )}
+              {errorMessage && (
+                <Alert variant="destructive" className="bg-red-100 border-red-300 text-red-800">
+                  <AlertDescription className="barlow font-medium uppercase">ERROR: {errorMessage}</AlertDescription>
                 </Alert>
               )}
             </div>
