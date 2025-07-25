@@ -54,88 +54,74 @@ export default function RaffleDrawApp() {
         const worksheet = workbook.Sheets[sheetName]
         const jsonData = XLSX.utils.sheet_to_json(worksheet) as ParticipantData[]
 
-        if (jsonData.length > 0) {
-          const columnNames = Object.keys(jsonData[0])
-          setColumns(columnNames)
-
-          const userIdColumn = columnNames.find(
-            (col) => col.toLowerCase().includes("userid") || col.toLowerCase().includes("user id"),
-          )
-          const responseIdColumn = columnNames.find(
-            (col) => col.toLowerCase().includes("responseid") || col.toLowerCase().includes("response id"),
-          )
-
-          if (!userIdColumn || !responseIdColumn) {
-            console.warn("UserID or ResponseID column not found. Duplicate handling might be inaccurate.")
-            setData(jsonData)
-            setFilteredData(jsonData)
-          } else {
-            const fightColumns = columnNames.filter((col) => col.toLowerCase().includes("vs"))
-            const groupedByUserId = new Map<string, ParticipantData[]>()
-
-            jsonData.forEach((p) => {
-              const userId = p[userIdColumn]?.toString()
-              if (userId) {
-                if (!groupedByUserId.has(userId)) {
-                  groupedByUserId.set(userId, [])
-                }
-                groupedByUserId.get(userId)!.push(p)
-              }
-            })
-
-            const deDupedData: ParticipantData[] = []
-
-            groupedByUserId.forEach((userRows, userId) => {
-              let latestOverallRow: ParticipantData | null = null
-              let latestOverallResponseId = -1
-
-              userRows.forEach((row) => {
-                const currentResponseId = Number.parseFloat(row[responseIdColumn]?.toString() || "0")
-                if (currentResponseId > latestOverallResponseId) {
-                  latestOverallResponseId = currentResponseId
-                  latestOverallRow = row
-                }
-              })
-
-              if (!latestOverallRow) return
-
-              const compositeParticipant: ParticipantData = { ...latestOverallRow }
-
-              fightColumns.forEach((fightCol) => {
-                let latestFightPrediction: string | number | null = null
-                let latestFightResponseId = -1
-
-                userRows.forEach((row) => {
-                  const currentResponseId = Number.parseFloat(row[responseIdColumn]?.toString() || "0")
-                  const prediction = row[fightCol]
-
-                  if (
-                    prediction &&
-                    prediction.toString().trim() !== "" &&
-                    prediction.toString().toLowerCase() !== "null"
-                  ) {
-                    if (currentResponseId > latestFightResponseId) {
-                      latestFightResponseId = currentResponseId
-                      latestFightPrediction = prediction
-                    }
-                  }
-                })
-                if (latestFightPrediction !== null) {
-                  compositeParticipant[fightCol] = latestFightPrediction
-                }
-              })
-              deDupedData.push(compositeParticipant)
-            })
-
-            setData(deDupedData)
-            setFilteredData(deDupedData)
-          }
-
+        if (jsonData.length === 0) {
+          setData([])
+          setFilteredData([])
+          setColumns([])
           setWinner(null)
           setFilterCondition({ column: "", value: "" })
-          setDrawTime(null) // Reset draw time on new upload
-          setCurrentPage(1) // Reset pagination
+          setDrawTime(null)
+          setCurrentPage(1)
+          setIsLoading(false)
+          return // Exit early if no data
         }
+
+        const columnNames = Object.keys(jsonData[0])
+        setColumns(columnNames)
+
+        // Identify key columns for de-duplication
+        const telephoneColumn = columnNames.find(
+          (col) => col.toLowerCase().includes("telephone") || col.toLowerCase().includes("phone"),
+        )
+        const responseIdColumn = columnNames.find(
+          (col) => col.toLowerCase().includes("responseid") || col.toLowerCase().includes("response id"),
+        )
+
+        if (!telephoneColumn || !responseIdColumn) {
+          console.warn("Telephone or ResponseID column not found. Duplicate handling might be inaccurate.")
+          setData(jsonData)
+          setFilteredData(jsonData)
+        } else {
+          const groupedByTelephone = new Map<string, ParticipantData[]>()
+
+          jsonData.forEach((p) => {
+            const telephone = p[telephoneColumn]?.toString()
+            if (telephone) {
+              if (!groupedByTelephone.has(telephone)) {
+                groupedByTelephone.set(telephone, [])
+              }
+              groupedByTelephone.get(telephone)!.push(p)
+            }
+          })
+
+          const deDupedData: ParticipantData[] = []
+
+          groupedByTelephone.forEach((userRows) => {
+            // Sort user's rows by ResponseID to ensure the latest is processed last
+            userRows.sort((a, b) => {
+              const resIdA = Number.parseFloat(a[responseIdColumn]?.toString() || "0")
+              const resIdB = Number.parseFloat(b[responseIdColumn]?.toString() || "0")
+              return resIdA - resIdB
+            })
+
+            let finalParticipant: ParticipantData = {}
+
+            // Merge properties from oldest to newest. The latest values will overwrite older ones.
+            userRows.forEach((row) => {
+              finalParticipant = { ...finalParticipant, ...row }
+            })
+
+            deDupedData.push(finalParticipant)
+          })
+
+          setData(deDupedData)
+          setFilteredData(deDupedData)
+        }
+
+        setWinner(null)
+        setFilterCondition({ column: "", value: "" })
+        setDrawTime(null) // Reset draw time on new upload
+        setCurrentPage(1) // Reset pagination
       } catch (error) {
         console.error("ERROR PARSING FILE:", error)
       } finally {
@@ -237,10 +223,8 @@ export default function RaffleDrawApp() {
   const endIndex = startIndex + itemsPerPage
   const currentTableData = filteredData.slice(startIndex, endIndex)
 
-  const handlePageChange = (page: number) => {
-    if (page >= 1 && page <= totalPages) {
-      setCurrentPage(page)
-    }
+  const handlePageChange = (newPage: number) => {
+    setCurrentPage(newPage)
   }
 
   return (
